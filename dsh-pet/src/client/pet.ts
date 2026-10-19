@@ -55,6 +55,14 @@ import { mountChatDialog } from '../shared/chat';
 import { fontStackOf, resolveFontPx } from '../shared/fonts';
 import { petBridge } from './settings';
 import { notifyFromFrame } from './notify';
+import {
+  HIDDEN_DISPLAYS_KEY,
+  hideTargets,
+  parseSavedDisplays,
+  rememberVisibleDisplays,
+  restoreTargets,
+  type DisplayTarget,
+} from './visibility';
 
 // 拖拽抛掷物理（弹簧跟手 + 甩抛 + 重力反弹）：两端共用同一份纯计算（src/shared/physics.ts）
 import {
@@ -75,7 +83,7 @@ import {
   type PetCollisionSlot,
   type ThrowState,
 } from '../shared/physics';
-import type { Animations, Corner, Pet, PhysicsParams, Weights } from '../shared/types';
+import type { Animations, Corner, Pet, PetDisplay, PhysicsParams, Weights } from '../shared/types';
 import type * as ReactNS from 'react';
 import type { Dispatch, ReactNode, SetStateAction } from 'react';
 import type { jsx } from 'react/jsx-runtime';
@@ -118,6 +126,13 @@ const css = [
   // 宠物就不跟手指走；两条 -webkit-* 抑制长按选中与 iOS 长按呼出系统菜单
   '.dsh-pet-hit{position:absolute;pointer-events:auto;cursor:url("/dsh-pet-7340/pic/cursor-grab.png") 16 16, grab;z-index:1;touch-action:none;-webkit-user-select:none;-webkit-touch-callout:none}',
   '.dsh-pet-hit.dragging{cursor:url("/dsh-pet-7340/pic/cursor-grabbing.png") 16 16, grabbing}',
+  // 快捷隐藏/显示：右下角小圆钮。常驻但低透明度，悬停/聚焦才完全显形；
+  // 全部隐藏时按钮仍在（这是唯一的恢复入口），所以不能随宠物节点一起卸载。
+  '.dsh-pet-quick-toggle{position:fixed;right:10px;bottom:12px;z-index:2147483000;display:flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.14));border-radius:50%;background:var(--dsw-alias-bg-layer-1,rgba(255,255,255,.92));color:var(--dsw-alias-label-primary,#2b2b2b);box-shadow:0 2px 10px rgba(0,0,0,.18);opacity:.4;cursor:pointer;transition:opacity .15s ease,transform .15s ease;backdrop-filter:blur(6px)}',
+  '.dsh-pet-quick-toggle:hover,.dsh-pet-quick-toggle:focus-visible{opacity:1;transform:scale(1.08)}',
+  '.dsh-pet-quick-toggle:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#2b63ff);outline-offset:2px}',
+  '.dsh-pet-quick-toggle.is-hidden{opacity:.85}',
+  '.dsh-pet-quick-toggle:disabled{opacity:.25;cursor:default}',
   '@media (prefers-reduced-motion: reduce){.dsh-pet-video{transition:none}}',
   // 统一右键菜单样式（与桌面注入同一份 MENU_CSS）
   MENU_CSS,
@@ -1996,6 +2011,86 @@ export function makePetUI(rt: {
     // 浏览器 overlay 只渲染 display ∈ {web, both} 的宠物；desktop / none 不参与网页显示
     const visiblePets = pets.filter((p) => isWebVisible(p.display));
 
+    // ---- 快捷隐藏 / 显示（右下角小圆钮 + Alt+Shift+P） ----
+    // 隐藏 = 把每只宠物写成 display:none（网页与桌面窗口一起消失；Helper 进程可能保留以便快速恢复）；
+    // 显示 = 按隐藏前记录的 display 恢复。记录同时写 localStorage：刷新页面后按钮仍能还原。
+    const [quickBusy, setQuickBusy] = useState(false);
+    const quickPrevRef = useRef<Record<string, PetDisplay> | null>(null);
+    const quickToggleRef = useRef<() => void>(() => {});
+    const allHidden = pets.length > 0 && pets.every((p) => p.display === 'none');
+
+    /** 依次写 /pet-display（宿主每次都会落盘并返回成品聚合），最后一次响应直接交给 reload。 */
+    const applyDisplays = async (targets: DisplayTarget[]): Promise<void> => {
+      let merged: Record<string, Record<string, unknown>> | undefined;
+      try {
+        for (const target of targets) {
+          const r = await fetch('/dsh-pet-7340/pet-display', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(target),
+          });
+          if (!r.ok) throw new Error('pet-display HTTP ' + r.status);
+          merged = (await r.json()) as Record<string, Record<string, unknown>>;
+        }
+        petBridge.reload(merged);
+      } catch (e) {
+        console.warn('[dsh-pet] 快捷隐藏/显示失败', e);
+        petBridge.reload(); // 失败时也拉一次权威配置，避免界面停在半改状态
+      }
+    };
+
+    const toggleAll = (): void => {
+      if (quickBusy) return;
+      setQuickBusy(true);
+      void (async () => {
+        try {
+          if (!allHidden) {
+            const remembered = rememberVisibleDisplays(pets);
+            if (Object.keys(remembered).length === 0) return;
+            quickPrevRef.current = remembered;
+            try {
+              window.localStorage.setItem(HIDDEN_DISPLAYS_KEY, JSON.stringify(remembered));
+            } catch {
+              /* 隐私模式 / 存储禁用：本次会话内仍可恢复 */
+            }
+            await applyDisplays(hideTargets(pets));
+          } else {
+            let saved = quickPrevRef.current;
+            if (saved === null) {
+              try {
+                saved = parseSavedDisplays(window.localStorage.getItem(HIDDEN_DISPLAYS_KEY));
+              } catch {
+                saved = null;
+              }
+            }
+            quickPrevRef.current = null;
+            try {
+              window.localStorage.removeItem(HIDDEN_DISPLAYS_KEY);
+            } catch {
+              /* 同上 */
+            }
+            await applyDisplays(restoreTargets(pets, saved));
+          }
+        } finally {
+          setQuickBusy(false);
+        }
+      })();
+    };
+    // 键盘监听只建一次；每次渲染把最新闭包塞进 ref，避免 effect 反复重建。
+    quickToggleRef.current = toggleAll;
+    useEffect(() => {
+      const onKeyDown = (e: KeyboardEvent): void => {
+        if (!e.altKey || !e.shiftKey || e.repeat || e.key.toLowerCase() !== 'p') return;
+        const target = e.target as HTMLElement | null;
+        const tag = target?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) return;
+        e.preventDefault();
+        quickToggleRef.current();
+      };
+      window.addEventListener('keydown', onKeyDown);
+      return () => window.removeEventListener('keydown', onKeyDown);
+    }, []);
+
     // ---- 统一轮询（GET /state，1s）：前端**唯一**的数据来源与渲染入口 ----
     // 每个叶子 = { counter, data }：首拉只记基线（不渲染——避免刷新页面时重放旧气泡），
     // 之后 counter 变了才渲染。分发到各功能（余额 / 工作状态 / 通知 / 说话）。
@@ -2118,28 +2213,57 @@ export function makePetUI(rt: {
       };
     }, [ready]);
 
-    return ready
-      ? visiblePets.map((p) =>
-          h(PetCard, {
-            key: p.id,
-            cfg: p as RuntimePet,
-            balance,
-            balanceTick,
-            balanceNoticeTick,
-            balanceManual,
-            workStatus,
-            workStatusTick,
-            say: sayRef.current[p.id],
-            sayTick,
-            animCue: animCueRef.current[p.id],
-            animCueTick,
-            posCue: posCueRef.current[p.id],
-            posCueTick,
-            throwCue: throwCueRef.current[p.id],
-            throwCueTick,
-            arena: arenaRef,
-          }),
-        )
+    const quickToggle = h('button', {
+      key: 'dsh-pet-quick-toggle',
+      type: 'button',
+      className: 'dsh-pet-quick-toggle' + (allHidden ? ' is-hidden' : ''),
+      title: (allHidden ? '显示桌宠' : '隐藏桌宠') + '（Alt+Shift+P）',
+      'aria-label': allHidden ? '显示桌宠' : '隐藏桌宠',
+      'aria-pressed': allHidden,
+      disabled: quickBusy,
+      onClick: () => toggleAll(),
+      children: h('svg', {
+        key: 'paw',
+        viewBox: '0 0 24 24',
+        width: '14',
+        height: '14',
+        'aria-hidden': 'true',
+        focusable: 'false',
+        children: [
+          h('ellipse', { key: 'pad', cx: '12', cy: '16.2', rx: '5.4', ry: '4.3', fill: 'currentColor' }),
+          h('ellipse', { key: 't1', cx: '6.2', cy: '9.6', rx: '2.3', ry: '2.9', fill: 'currentColor' }),
+          h('ellipse', { key: 't2', cx: '10.1', cy: '7.1', rx: '2.3', ry: '2.9', fill: 'currentColor' }),
+          h('ellipse', { key: 't3', cx: '14.3', cy: '7.1', rx: '2.3', ry: '2.9', fill: 'currentColor' }),
+          h('ellipse', { key: 't4', cx: '18.1', cy: '9.7', rx: '2.3', ry: '2.9', fill: 'currentColor' }),
+        ],
+      }),
+    });
+
+    return ready && pets.length > 0
+      ? [
+          quickToggle,
+          ...visiblePets.map((p) =>
+            h(PetCard, {
+              key: p.id,
+              cfg: p as RuntimePet,
+              balance,
+              balanceTick,
+              balanceNoticeTick,
+              balanceManual,
+              workStatus,
+              workStatusTick,
+              say: sayRef.current[p.id],
+              sayTick,
+              animCue: animCueRef.current[p.id],
+              animCueTick,
+              posCue: posCueRef.current[p.id],
+              posCueTick,
+              throwCue: throwCueRef.current[p.id],
+              throwCueTick,
+              arena: arenaRef,
+            }),
+          ),
+        ]
       : null;
   }
 

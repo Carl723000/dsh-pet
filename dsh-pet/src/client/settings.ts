@@ -112,6 +112,10 @@ const SETTINGS_CSS = [
 
   // 输入 / 下拉
   '.dsh-pet-cfg__inp{box-sizing:border-box;width:100%;min-height:28px;padding:4px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;outline:none}',
+  '.dsh-pet-cfg__rangeRow{display:flex;align-items:center;gap:8px;min-width:0}',
+  '.dsh-pet-cfg__range{flex:1;min-width:0;accent-color:var(--dsw-alias-state-business-primary,#2b63ff);cursor:pointer}',
+  '.dsh-pet-cfg__range:disabled{cursor:default;opacity:.5}',
+  '.dsh-pet-cfg__rangeVal{flex:none;min-width:56px;text-align:right;font-size:12px;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}',
   '.dsh-pet-cfg__inp:focus{border-color:var(--dsw-alias-state-business-primary)}',
   '.dsh-pet-cfg__inp:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}',
 
@@ -210,7 +214,7 @@ export const zh = {
   atLeastOne: '至少保留一个宠物。',
   emptyPets: '暂无宠物，点击「添加宠物」创建。',
   sizeLabel: '大小（宽度 px）',
-  sizeHint: '高度自动 = 宽度 × 9/16。',
+  sizeHint: '拖动滑条调整宽度（120~1000 px）；高度自动 = 宽度 × 9/16。',
   nameLabel: '名字',
   nameHint: '显示名：鼠标悬浮宠物时弹出，也会加进 AI 人设（你的名字是 X）。可重复，留空按宠物 id 处理。',
   balanceEnabled: '余额功能',
@@ -381,7 +385,7 @@ export const en = {
   atLeastOne: 'Keep at least one pet.',
   emptyPets: 'No pets yet — click "Add pet" to create one.',
   sizeLabel: 'Size (width px)',
-  sizeHint: 'Height is automatic = width × 9/16.',
+  sizeHint: 'Drag the slider to set the width (120–1000 px); height is automatic = width × 9/16.',
   nameLabel: 'Name',
   nameHint:
     'Shown on hover and added to AI personas ("your name is X"). Duplicates allowed; empty falls back to the pet id.',
@@ -1333,6 +1337,27 @@ export function makePetConfigSection(rt: {
         onChange: (e: ChangeEvent<HTMLInputElement>) => setter(Number(e.target.value)),
       });
 
+    /** 大小滑条：拖动即时改值，右侧显示当前 px；比数字输入更适合"看着调"。 */
+    const sizeSlider = (value: number, setter: (v: number) => void): ReturnType<typeof h> =>
+      h('div', {
+        className: 'dsh-pet-cfg__rangeRow',
+        children: [
+          h('input', {
+            key: 'range',
+            type: 'range',
+            className: 'dsh-pet-cfg__range',
+            min: '120',
+            max: '1000',
+            step: '2',
+            value: String(value),
+            disabled: busy,
+            'aria-label': t('sizeLabel'),
+            onChange: (e: ChangeEvent<HTMLInputElement>) => setter(Number(e.target.value)),
+          }),
+          h('span', { key: 'value', className: 'dsh-pet-cfg__rangeVal', children: value + ' px' }),
+        ],
+      });
+
     /** 物理参数的一格：标签 + 问号在上、数字输入在下（说明进问号） */
     const physField = (
       key: 'gravity' | 'restitution' | 'groundFriction' | 'throwPower',
@@ -1486,7 +1511,7 @@ export function makePetConfigSection(rt: {
                     ),
                     field(
                       t('sizeLabel'),
-                      numInput('size', cur.size, (v) => updateSel({ size: v })),
+                      sizeSlider(cur.size, (v) => updateSel({ size: v })),
                       t('sizeHint'),
                     ),
                     field(
